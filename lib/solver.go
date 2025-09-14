@@ -9,75 +9,162 @@ type Step struct {
 	Feedback Feedback
 }
 
-// Returns only those targets that would produce the same feedback when scored
-// against the provided guess.
-func FilterCandidates(
-	candidates []string,
-	guess string,
-	fb Feedback,
-) []string {
-	out := candidates[:0]
-	for _, t := range candidates {
-		got, err := Score(guess, t)
-		if err != nil {
-			continue
-		}
+// Trace holds information about one turn, used for real-time observers.
+type Trace struct {
+	Turn              int
+	Guess             string
+	Feedback          Feedback
+	CandidatesBefore  int
+	CandidatesAfter   int
+	PoolSize          int
+	ChosenEntropyBits float64
+}
 
-		if got == fb {
-			out = append(out, t)
+type ScoreTable struct {
+	// Table holds Feedback for (guessIdx * len(answers) + answerIdx)
+	Table       []Feedback
+	GuessIndex  map[string]int // guess -> row index (built from union(allowed, answers))
+	AnswerIndex map[string]int // answer -> column index (built from answers list)
+	AnswersLen  int
+	Guesses     []string
+	Answers     []string
+}
+
+// Precomputes Feedback for every (guess, answer), where This guarantees we have a row even
+// if you use an answer as a guess.
+func BuildScoreTable(allowed, answers []string) *ScoreTable {
+	seen := make(map[string]bool, len(allowed)+len(answers))
+	guesses := make([]string, 0, len(allowed)+len(answers))
+
+	for _, g := range allowed {
+		if !seen[g] {
+			seen[g] = true
+			guesses = append(guesses, g)
 		}
 	}
 
+	for _, a := range answers {
+		if !seen[a] {
+			seen[a] = true
+			guesses = append(guesses, a)
+		}
+	}
+
+	gi := make(map[string]int, len(guesses))
+	ai := make(map[string]int, len(answers))
+	for i, g := range guesses {
+		gi[g] = i
+	}
+	for j, a := range answers {
+		ai[a] = j
+	}
+
+	tbl := make([]Feedback, len(guesses)*len(answers))
+	for i, g := range guesses {
+		row := i * len(answers)
+		for j, a := range answers {
+			fb, _ := Score(g, a)
+			tbl[row+j] = fb
+		}
+	}
+
+	return &ScoreTable{
+		Table:       tbl,
+		GuessIndex:  gi,
+		AnswerIndex: ai,
+		AnswersLen:  len(answers),
+		Guesses:     guesses,
+		Answers:     answers,
+	}
+}
+
+// Returns Feedback for (guess, answer) via the table.
+// If either word is missing (shouldn’t happen with union), it falls back to Score().
+func fbFromTable(st *ScoreTable, guess, answer string) Feedback {
+	gidx, gok := st.GuessIndex[guess]
+	aidx, aok := st.AnswerIndex[answer]
+	if gok && aok {
+		return st.Table[gidx*st.AnswersLen+aidx]
+	}
+	// Slow-path fallback: still correct.
+	fb, _ := Score(guess, answer)
+	return fb
+}
+
+// Returns only those targets that would produce the same feedback when scored
+// against the provided guess. (Uses precomputed table when possible.)
+func FilterCandidates(
+	st *ScoreTable,
+	candidates []string,
+	guess string,
+	want Feedback,
+) []string {
+	out := candidates[:0]
+	gidx, gok := st.GuessIndex[guess]
+	base := gidx * st.AnswersLen
+
+	for _, t := range candidates {
+		if aidx, aok := st.AnswerIndex[t]; gok && aok {
+			if st.Table[base+aidx] == want {
+				out = append(out, t)
+			}
+		} else {
+			// fallback if somehow not in the table
+			if got, _ := Score(guess, t); got == want {
+				out = append(out, t)
+			}
+		}
+	}
 	return append([]string(nil), out...)
 }
 
-// Computes the expected information (bits) if we were to play 'guess' against
-// the current candidate set. It builds a distribution over all possible
-// feedback patterns, then sums -p*log2(p).
-func entropyForGuess(guess string, candidates []string) float64 {
+// Computes the expected information (bits) for 'guess' against current candidates.
+// Uses table lookups; falls back to Score if a word isn’t indexed (should be rare).
+func entropyForGuessFast(
+	guess string,
+	candidates []string,
+	st *ScoreTable,
+) float64 {
 	if len(candidates) == 0 {
 		return 0
 	}
-
 	counts := make(map[Feedback]int, 64)
-	for _, t := range candidates {
-		fb, err := Score(guess, t)
-		if err != nil {
-			continue
-		}
-		counts[fb]++
-	}
+	gidx, gok := st.GuessIndex[guess]
+	base := gidx * st.AnswersLen
 
+	for _, t := range candidates {
+		if aidx, aok := st.AnswerIndex[t]; gok && aok {
+			counts[st.Table[base+aidx]]++
+		} else {
+			fb, _ := Score(guess, t)
+			counts[fb]++
+		}
+	}
 	n := float64(len(candidates))
 	var h float64
 	for _, c := range counts {
 		p := float64(c) / n
-		// log2(p) - ln(p)/ln(2)
-		h -= p * (math.Log(p) / math.Log(2))
+		h -= p * (math.Log(p) / math.Log(2)) // log2
 	}
-
 	return h
 }
 
-// Picks the guess (from guessSet) with th emaximum entropy relative to the
+// Picks the guess (from guessSet) with the maximum entropy relative to the
 // current candidates. Tie-break by preferring a guess that is itself still
 // a possible target.
 func ChooseNextGuess(
 	guessSet,
 	candidates []string,
-) (
-	best string,
-	bestEntropy float64,
-) {
+	st *ScoreTable,
+) (best string, bestEntropy float64) {
 	inC := make(map[string]bool, len(candidates))
 	for _, w := range candidates {
 		inC[w] = true
 	}
 
-	best = ""
-	bestEntropy = -1.0
+	best, bestEntropy = "", -1.0
 	for _, g := range guessSet {
-		h := entropyForGuess(g, candidates)
+		h := entropyForGuessFast(g, candidates, st)
 		if h > bestEntropy || (almostEqual(h, bestEntropy) && inC[g]) {
 			best, bestEntropy = g, h
 		}
@@ -92,17 +179,16 @@ func almostEqual(a, b float64) bool {
 	return b-a < 1e-9
 }
 
-// Plays a full game against 'answer' for up to maxTurns guesses, using the
-// entropy to choose each guess. It returns whether we won, how many turns
-// it took, and the move history.
-func SolveOne(
-	answer string, answers,
+// Solves one game, using the provided observer to report each turn.
+func SolveOneWithObserver(
+	answer string,
+	answers []string,
 	guessSet []string,
 	maxTurns int,
-) (
-	won bool, turns int,
-	hist []Step,
-) {
+	obs func(Trace),
+	st *ScoreTable,
+) (won bool, turns int, hist []Step) {
+
 	candidates := append([]string(nil), answers...)
 	guessed := make(map[string]bool, 16)
 
@@ -113,33 +199,41 @@ func SolveOne(
 		}
 		pool = excludeGuessed(pool, guessed)
 		if len(pool) == 0 {
-			// Fallback: if the pool is empty (shouldn’t happen),
-			// try any candidate not guessed
 			pool = excludeGuessed(candidates, guessed)
 			if len(pool) == 0 {
 				return false, turn, hist
 			}
 		}
 
-		guess, _ := ChooseNextGuess(pool, candidates)
+		guess, ent := ChooseNextGuess(pool, candidates, st)
 		if guess == "" {
-			// No valid choice; bail safely.
 			return false, turn, hist
 		}
 		guessed[guess] = true
 
-		fb, err := Score(guess, answer)
-		if err != nil {
-			// With clean lists this shouldn't happen.
-			return false, turn, hist
-		}
+		cBefore := len(candidates)
+		fb := fbFromTable(st, guess, answer)
 		hist = append(hist, Step{Guess: guess, Feedback: fb})
+
+		// shrink candidate set
+		candidates = FilterCandidates(st, candidates, guess, fb)
+		cAfter := len(candidates)
+
+		if obs != nil {
+			obs(Trace{
+				Turn:              turn,
+				Guess:             guess,
+				Feedback:          fb,
+				CandidatesBefore:  cBefore,
+				CandidatesAfter:   cAfter,
+				PoolSize:          len(pool),
+				ChosenEntropyBits: ent,
+			})
+		}
 
 		if AllGreen(fb) {
 			return true, turn, hist
 		}
-
-		candidates = FilterCandidates(candidates, guess, fb)
 	}
 	return false, maxTurns, hist
 }
