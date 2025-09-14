@@ -2,6 +2,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"runtime"
@@ -13,9 +14,10 @@ import (
 )
 
 type result struct {
-	Answer string
-	Won    bool
-	Turns  int
+	Answer     string
+	Won        bool
+	Turns      int
+	BoardLines []string
 }
 
 type gameReport struct {
@@ -34,6 +36,11 @@ func main() {
 
 	workers := runtime.NumCPU()
 	runtime.GOMAXPROCS(workers)
+
+	startWord := flag.String("start", lib.StartWord, "starting guess word")
+	flag.Parse()
+
+	lib.StartWord = *startWord
 
 	answers, err := lib.LoadWords(answersFile)
 	if err != nil {
@@ -57,10 +64,6 @@ func main() {
 	results := runBench(answers, allowed, maxTurns, workers, scoreTable)
 	elapsed := time.Since(start)
 
-	// --- Summary (print below the display block) ---
-	const displayHeight = 1 /*progress*/ + 6 /*board*/ + 1 /*result*/ + 3 /*padding*/
-	fmt.Printf("\x1b[%dB", displayHeight)
-
 	total := len(results)
 	solved := 0
 	sumTurns := 0
@@ -74,12 +77,22 @@ func main() {
 	if solved > 0 {
 		avg = float64(sumTurns) / float64(solved)
 	}
-	fmt.Printf("\n=== summary ===\n")
+	fmt.Printf("\n=== SUMMARY ===\n")
 	fmt.Printf("answers=%d  workers=%d  maxTurns=%d\n", total, workers, maxTurns)
 	fmt.Printf("elapsed=%s\n", elapsed.Round(time.Millisecond))
-	fmt.Printf("solved=%d  failed=%d\n", solved, total-solved)
+	fmt.Printf("✅ solved=%d  ❌ failed=%d\n", solved, total-solved)
 	if solved > 0 {
-		fmt.Printf("average turns (solved) = %.3f\n", avg)
+		fmt.Printf("average turns (solved) = %.3f\n\n", avg)
+	}
+
+	for _, r := range results {
+		if !r.Won {
+			fmt.Printf("Answer: %s (❌ failed in %d turns)\n", r.Answer, r.Turns)
+			for _, line := range r.BoardLines {
+				fmt.Println(line)
+			}
+			fmt.Println()
+		}
 	}
 }
 
@@ -139,7 +152,7 @@ func runBench(answers, allowed []string, maxTurns, workers int, st *lib.ScoreTab
 				}
 
 				won, turns, _ := lib.SolveOneWithObserver(ans, answers, allowed, maxTurns, obs, st)
-				out[i] = result{Answer: ans, Won: won, Turns: turns}
+				out[i] = result{Answer: ans, Won: won, Turns: turns, BoardLines: board}
 
 				// Update counters first so renderer sees consistent totals
 				atomic.AddInt64(&completed, 1)
@@ -269,9 +282,9 @@ func doRender(
 			}
 		}
 		if gr.Won {
-			lines = append(lines, fmt.Sprintf("Result %d/%d: %s — ✔ solved in %d", c, total, gr.Answer, gr.Turns))
+			lines = append(lines, fmt.Sprintf("Result %d/%d: %s (✅ solved in %d)", c, total, gr.Answer, gr.Turns))
 		} else {
-			lines = append(lines, fmt.Sprintf("Result %d/%d: %s — ✘ failed in %d", c, total, gr.Answer, gr.Turns))
+			lines = append(lines, fmt.Sprintf("Result %d/%d: %s (❌ failed in %d)", c, total, gr.Answer, gr.Turns))
 		}
 	} else {
 		for i := 0; i < maxTurns+1; i++ {

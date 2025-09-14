@@ -4,6 +4,8 @@ import (
 	"math"
 )
 
+var StartWord = "tales"
+
 type Step struct {
 	Guess    string
 	Feedback Feedback
@@ -205,7 +207,15 @@ func SolveOneWithObserver(
 			}
 		}
 
-		guess, ent := ChooseNextGuess(pool, candidates, st)
+		var guess string
+		var ent float64
+		if turn == 1 {
+			guess = StartWord
+			// optional: keep telemetry comparable
+			ent = entropyForGuessFast(guess, candidates, st)
+		} else {
+			guess, ent = ChooseNextGuess(pool, candidates, st)
+		}
 		if guess == "" {
 			return false, turn, hist
 		}
