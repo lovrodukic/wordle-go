@@ -65,18 +65,18 @@ func AllGreen(t [5]Tile) bool {
 }
 
 func TilesToEmoji(t [5]Tile) string {
-	out := make([]rune, 0, 5)
+	out := ""
 	for i := range t {
 		switch t[i] {
-		case Gray:
-			out = append(out, '⬜')
-		case Yellow:
-			out = append(out, '🟨')
 		case Green:
-			out = append(out, '🟩')
+			out += "🟩"
+		case Yellow:
+			out += "🟨"
+		case Gray:
+			out += "🔳"
 		}
 	}
-	return string(out)
+	return out
 }
 
 type Game struct {

@@ -97,5 +97,5 @@ func main() {
 	if won {
 		status = "won"
 	}
-	fmt.Printf("result: %s in %d turns", status, turns)
+	fmt.Printf("result: %s in %d turns\n", status, turns)
 }
