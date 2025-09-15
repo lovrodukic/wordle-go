@@ -190,6 +190,8 @@ func SolveOneWithObserver(
 	obs func(Trace),
 	st *ScoreTable,
 ) (won bool, turns int, hist []Step) {
+	assertValidStart(st)
+	assertValidAnswer(st, answer)
 
 	candidates := append([]string(nil), answers...)
 	guessed := make(map[string]bool, 16)
@@ -259,4 +261,16 @@ func excludeGuessed(words []string, used map[string]bool) []string {
 		out = append(out, w)
 	}
 	return out
+}
+
+func assertValidStart(st *ScoreTable) {
+	if _, ok := st.GuessIndex[StartWord]; !ok {
+		panic("lib.StartWord " + StartWord + " is not in allowed/answers")
+	}
+}
+
+func assertValidAnswer(st *ScoreTable, answer string) {
+	if _, ok := st.AnswerIndex[answer]; !ok {
+		panic("answer " + answer + " is not in answers list")
+	}
 }
